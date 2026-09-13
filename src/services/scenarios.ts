@@ -2,6 +2,33 @@ import { DemoScenario } from '../types';
 
 export const SIMULATION_SCENARIOS: DemoScenario[] = [
   {
+    id: 'pnb-credit-card-demo',
+    title: 'Punjab National Bank (Context Match → OTP Threat)',
+    titleHindi: 'पंजाब नेशनल बैंक (कॉन्टेक्स्ट मैच → OTP फ्रॉड)',
+    tag: 'Context Match Demo',
+    callerType: 'Financial Impersonator with Expected Context',
+    riskExpectation: 'HIGH',
+    callerIdentity: 'Punjab National Bank (Vivek Khand Branch)',
+    callerIdentityHindi: 'पंजाब नेशनल बैंक (विवेक खंड शाखा)',
+    callerNumber: '+91 98210 99887',
+    expectedOrganization: 'Punjab National Bank',
+    expectedReason: 'Credit card application',
+    description:
+      'Demonstrates why expected context is only supporting evidence. The caller matches an expected credit card application call (initial LOW risk 18), but later demands an OTP, causing risk to escalate 18 → 34 → 82.',
+    descriptionHindi:
+      'यह दर्शाता है कि कॉन्टेक्स्ट मैच सिर्फ सहायक साक्ष्य है। कॉलर अपेक्षित क्रेडिट कार्ड आवेदन से मेल खाता है (प्रारंभिक रिस्क 18), लेकिन बाद में OTP मांगता है जिससे रिस्क 18 → 34 → 82 हो जाता है।',
+    simulatedTurns: [
+      "I'm calling from Punjab National Bank regarding your credit card application.",
+      "I have your application details here from the portal. I just need to verify a few routine details before moving it forward.",
+      "To complete the verification and disburse the card, I need the 6-digit OTP that was just sent to your phone.",
+    ],
+    simulatedTurnsHindi: [
+      "नमस्ते, मैं पंजाब नेशनल बैंक से आपके क्रेडिट कार्ड आवेदन के संबंध में बात कर रहा हूँ।",
+      "पोर्टल पर आपके आवेदन का विवरण दर्ज है। आगे की प्रक्रिया पूरी करने से पहले मुझे कुछ सामान्य जानकारी सत्यापित करनी है।",
+      "वेरिफिकेशन पूरा करने और कार्ड जारी करने के लिए, आपके फोन पर जो 6 अंकों का OTP आया है, कृपया वह बता दीजिए।",
+    ],
+  },
+  {
     id: 'legitimate-project',
     title: 'Legitimate Project Team Call',
     titleHindi: 'वैध प्रोजेक्ट टीम कॉल (सुरक्षित)',

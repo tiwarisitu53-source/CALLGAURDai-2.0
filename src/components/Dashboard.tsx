@@ -13,6 +13,10 @@ import {
   Activity,
   Mic,
   Cpu,
+  Building2,
+  TrendingUp,
+  CheckCircle2,
+  AlertOctagon,
 } from 'lucide-react';
 import { ScreeningSession, RiskLevel, ScreeningMode } from '../types';
 
@@ -23,7 +27,7 @@ interface DashboardProps {
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
-  sessions,
+  sessions = [],
   onClearSessions,
   onStartNewCall,
 }) => {
@@ -31,17 +35,19 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [filterLevel, setFilterLevel] = useState<'ALL' | RiskLevel>('ALL');
   const [filterMode, setFilterMode] = useState<'ALL' | ScreeningMode>('ALL');
 
-  // Stats calculations
-  const total = sessions.length;
-  const liveCount = sessions.filter((s) => s.mode === 'LIVE').length;
-  const simCount = sessions.filter((s) => s.mode === 'SIMULATION').length;
-  const lowRisk = sessions.filter((s) => s.finalRiskLevel === 'LOW').length;
-  const medRisk = sessions.filter((s) => s.finalRiskLevel === 'MEDIUM').length;
-  const highRisk = sessions.filter((s) => s.finalRiskLevel === 'HIGH').length;
-  const blocked = sessions.filter((s) => s.finalAction === 'BLOCKED').length;
-  const connected = sessions.filter((s) => s.finalAction === 'CONNECTED').length;
+  const safeSessions = Array.isArray(sessions) ? sessions : [];
 
-  const filteredSessions = sessions.filter((s) => {
+  // Stats calculations
+  const total = safeSessions.length;
+  const liveCount = safeSessions.filter((s) => s.mode === 'LIVE').length;
+  const simCount = safeSessions.filter((s) => s.mode === 'SIMULATION').length;
+  const lowRisk = safeSessions.filter((s) => s.finalRiskLevel === 'LOW').length;
+  const medRisk = safeSessions.filter((s) => s.finalRiskLevel === 'MEDIUM').length;
+  const highRisk = safeSessions.filter((s) => s.finalRiskLevel === 'HIGH').length;
+  const blocked = safeSessions.filter((s) => s.finalAction === 'BLOCKED').length;
+  const connected = safeSessions.filter((s) => s.finalAction === 'CONNECTED').length;
+
+  const filteredSessions = safeSessions.filter((s) => {
     const levelMatch = filterLevel === 'ALL' || s.finalRiskLevel === filterLevel;
     const modeMatch = filterMode === 'ALL' || s.mode === filterMode;
     return levelMatch && modeMatch;
@@ -141,7 +147,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               ))}
             </div>
 
-            {sessions.length > 0 && (
+            {safeSessions.length > 0 && (
               <button
                 onClick={onClearSessions}
                 className="p-2 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-rose-950/30 border border-slate-800 transition-colors"
@@ -223,6 +229,27 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800/90 text-slate-300 border border-slate-700/80">
                           {session.language === 'hi' ? 'हिंदी' : 'English'}
                         </span>
+
+                        {session.matchedExpectedCall && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 flex items-center gap-1">
+                            <Building2 className="w-2.5 h-2.5" />
+                            <span>Expected: {session.matchedExpectedCall.organization}</span>
+                          </span>
+                        )}
+
+                        {session.userVerification && (
+                          <span
+                            className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                              session.userVerification === 'EXPECTED'
+                                ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                                : session.userVerification === 'UNEXPECTED'
+                                ? 'bg-rose-500/10 text-rose-300 border-rose-500/30'
+                                : 'bg-slate-800 text-slate-400 border-slate-700'
+                            }`}
+                          >
+                            User: {session.userVerification}
+                          </span>
+                        )}
                       </div>
 
                       <p className="text-xs text-slate-300 font-medium mt-1">
@@ -313,6 +340,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   <span className="font-bold text-slate-200 text-sm">
                     {selectedSession.finalRiskLevel} RISK ({selectedSession.finalRiskScore}/100)
                   </span>
+                  {selectedSession.peakRiskScore !== undefined && selectedSession.peakRiskScore !== selectedSession.finalRiskScore && (
+                    <span className="text-[10px] text-rose-400 block font-mono">
+                      Peak reached: {selectedSession.peakRiskScore}/100
+                    </span>
+                  )}
                 </div>
                 <div className="text-center">
                   <span className="text-slate-400 block">Language</span>
@@ -331,6 +363,64 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   </span>
                 </div>
               </div>
+
+              {/* Context Match & Verification Breakdown */}
+              {(selectedSession.matchedExpectedCall || selectedSession.userVerification) && (
+                <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800 space-y-2 text-xs">
+                  <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">
+                    Context & Verification
+                  </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {selectedSession.matchedExpectedCall && (
+                      <div className="p-2 rounded-lg bg-indigo-950/40 border border-indigo-500/30">
+                        <span className="text-[10px] text-indigo-300 block font-semibold">Matched Expected Call:</span>
+                        <span className="text-slate-100 font-bold">{selectedSession.matchedExpectedCall.organization}</span>
+                        <span className="text-[10px] text-slate-400 block">{selectedSession.matchedExpectedCall.reason}</span>
+                      </div>
+                    )}
+                    {selectedSession.userVerification && (
+                      <div className="p-2 rounded-lg bg-slate-900 border border-slate-800">
+                        <span className="text-[10px] text-slate-400 block font-semibold">User Verification Prompt:</span>
+                        <span className="text-slate-100 font-bold">
+                          {selectedSession.userVerification === 'EXPECTED'
+                            ? '✓ Confirmed Expected by user'
+                            : selectedSession.userVerification === 'UNEXPECTED'
+                            ? '✗ Reported Unexpected by user'
+                            : 'Unavailable / No Response (Treated as Unknown)'}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Dynamic Risk Timeline if recorded */}
+              {selectedSession.riskTimeline && selectedSession.riskTimeline.length > 0 && (
+                <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800 space-y-2 text-xs">
+                  <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider flex items-center gap-1.5">
+                    <TrendingUp className="w-3.5 h-3.5 text-indigo-400" />
+                    Risk Evolution Across Turns
+                  </span>
+                  <div className="flex items-center gap-2 overflow-x-auto py-1">
+                    {selectedSession.riskTimeline.map((pt, idx) => (
+                      <div
+                        key={idx}
+                        className="flex flex-col items-center p-1.5 px-2.5 rounded-lg bg-slate-900 border border-slate-800 min-w-[70px] text-center"
+                      >
+                        <span
+                          className={`text-xs font-mono font-black ${
+                            pt.score >= 71 ? 'text-rose-400' : pt.score >= 31 ? 'text-amber-400' : 'text-emerald-400'
+                          }`}
+                        >
+                          {pt.score}/100
+                        </span>
+                        <span className="text-[9px] text-slate-400">Turn {pt.turn}</span>
+                        <span className="text-[8px] text-slate-500 truncate max-w-[65px]">{pt.triggerEvent || 'Signal'}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {selectedSession.scenarioTitle && (
                 <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800/80 text-xs">

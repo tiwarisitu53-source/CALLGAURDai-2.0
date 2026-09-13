@@ -29,7 +29,9 @@ function analyzeLocally(
   userMessage: string,
   currentScore: number,
   historyCount: number,
-  language: "en" | "hi" = "en"
+  language: "en" | "hi" = "en",
+  expectedCalls: Array<{ organization: string; reason: string; category?: string }> = [],
+  userVerification: "EXPECTED" | "UNEXPECTED" | "NOT_SURE" | "UNAVAILABLE" = "UNAVAILABLE"
 ) {
   const lower = userMessage.toLowerCase();
   const signals: string[] = [];
@@ -37,6 +39,41 @@ function analyzeLocally(
   let category = "General Inquiry";
   let intent = "Caller provided general statement";
   let stage: "INITIAL" | "DISCOVERY" | "VERIFICATION" | "FINAL_DECISION" = "DISCOVERY";
+  let claimedOrganization = "";
+  let matchedExpected: { organization: string; reason: string } | null = null;
+
+  // Check against expected calls
+  if (expectedCalls && expectedCalls.length > 0) {
+    for (const exp of expectedCalls) {
+      const orgTerms = exp.organization.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+      const reasonTerms = exp.reason.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+      const orgMatch =
+        lower.includes(exp.organization.toLowerCase()) ||
+        (exp.organization.toLowerCase().includes("punjab national") && (lower.includes("punjab") || lower.includes("pnb"))) ||
+        orgTerms.some((t) => lower.includes(t));
+      const reasonMatch =
+        lower.includes(exp.reason.toLowerCase()) ||
+        reasonTerms.some((t) => lower.includes(t)) ||
+        (exp.reason.toLowerCase().includes("credit card") && lower.includes("card"));
+
+      if (orgMatch || reasonMatch) {
+        matchedExpected = { organization: exp.organization, reason: exp.reason };
+        claimedOrganization = exp.organization;
+        signals.push("Context matched expected interaction (Supporting signal only)");
+        break;
+      }
+    }
+  }
+
+  // Handle user verification signals
+  if (userVerification === "EXPECTED") {
+    signals.push("User indicated call was expected (Supporting signal)");
+  } else if (userVerification === "UNEXPECTED") {
+    signals.push("User reported call was NOT expected (+25 risk)");
+    addedScore += 25;
+  } else if (userVerification === "UNAVAILABLE") {
+    signals.push("User verification unavailable (Treated as UNKNOWN)");
+  }
 
   // Critical credential / fraud signals (Jumps directly to HIGH)
   // Supports English, Hindi, and Hinglish terminology
@@ -46,7 +83,7 @@ function analyzeLocally(
     lower.includes("verification code") ||
     lower.includes("code sent to your phone") ||
     lower.includes("share kar dijiye") ||
-    lower.includes("bata dijiye") && lower.includes("code") ||
+    (lower.includes("bata dijiye") && lower.includes("code")) ||
     lower.includes("ओटीपी") ||
     lower.includes("ओ टी पी") ||
     lower.includes("सत्यापन कोड") ||
@@ -54,7 +91,8 @@ function analyzeLocally(
   ) {
     signals.push("OTP / Verification Code Request");
     signals.push("Sensitive authentication data request");
-    addedScore += 55;
+    signals.push("Caller requested a one-time password");
+    addedScore += 65;
     category = "Credential Theft";
     intent = "Attempting to harvest one-time passcode for account takeover";
   } else if (
@@ -124,6 +162,8 @@ function analyzeLocally(
   // Intermediate signals (Raises risk to MEDIUM, but not instant BLOCK without critical signal)
   if (
     lower.includes("bank") ||
+    lower.includes("punjab national") ||
+    lower.includes("pnb") ||
     lower.includes("wells fargo") ||
     lower.includes("chase") ||
     lower.includes("fraud prevention") ||
@@ -135,13 +175,16 @@ function analyzeLocally(
     lower.includes("डेबिट कार्ड")
   ) {
     signals.push("Bank / Financial institution reference");
-    if (signals.length <= 1) addedScore += 15;
-    if (category === "General Inquiry") category = "Bank Security Inquiry";
+    if (!claimedOrganization) {
+      claimedOrganization = lower.includes("punjab") ? "Punjab National Bank" : "Financial Institution";
+    }
+    if (signals.length <= 2 && !matchedExpected) addedScore += 15;
+    if (category === "General Inquiry") category = "Banking / Financial Inquiry";
     if (!intent.includes("harvest") && !intent.includes("solicit"))
-      intent = "Claiming bank or account security inquiry";
+      intent = "Claiming bank or account inquiry";
   }
 
-  // E-Commerce / Amazon handling (Cautious, NOT instant fraud - Section 9)
+  // E-Commerce / Amazon handling
   if (
     lower.includes("amazon") ||
     lower.includes("अमेज़न") ||
@@ -154,7 +197,7 @@ function analyzeLocally(
     if (category === "General Inquiry") category = "E-Commerce Account Inquiry";
     if (!intent.includes("harvest") && !intent.includes("solicit")) {
       intent = "Caller claims to be from Amazon or delivery regarding account or parcel";
-      addedScore += 10; // Cautious slight increase, stays LOW risk (~15) unless sensitive data requested
+      addedScore += 10;
     }
   }
 
@@ -287,6 +330,15 @@ function analyzeLocally(
     isFinal,
     conversationStage: stage,
     unansweredQuestions: action === "SCREEN_FURTHER" ? ["Verified caller identity", "Specific nature of request"] : [],
+    claimedOrganization: claimedOrganization || undefined,
+    contextMatch: matchedExpected
+      ? {
+          matched: true,
+          organization: matchedExpected.organization,
+          reason: matchedExpected.reason,
+          notes: "Supporting signal only. Does not guarantee caller legitimacy.",
+        }
+      : undefined,
   };
 }
 
@@ -471,7 +523,7 @@ async function startServer() {
   });
 
   // 3. Core Call Screening Analysis endpoint
-  // Common Risk Engine for English, Hindi, and Hinglish
+  // Common Risk Engine for English, Hindi, and Hinglish with Expected Calls integration
   app.post("/api/screen", async (req, res) => {
     try {
       const {
@@ -481,6 +533,8 @@ async function startServer() {
         userMessage = "",
         currentRiskScore = 5,
         language = "en",
+        expectedCalls = [],
+        userVerification = "UNAVAILABLE",
       } = req.body;
 
       if (!userMessage || typeof userMessage !== "string") {
@@ -495,7 +549,9 @@ async function startServer() {
           userMessage,
           currentRiskScore,
           history.length,
-          language === "hi" ? "hi" : "en"
+          language === "hi" ? "hi" : "en",
+          expectedCalls,
+          userVerification
         );
         return res.json(fallback);
       }
@@ -509,6 +565,16 @@ async function startServer() {
         .join("\n");
 
       const isHindi = language === "hi";
+
+      const expectedCallsSummary =
+        expectedCalls && expectedCalls.length > 0
+          ? expectedCalls
+              .map(
+                (c: any) =>
+                  `- Organization: "${c.organization}", Reason: "${c.reason}", Category: "${c.category || 'General'}"`
+              )
+              .join("\n")
+          : "None registered.";
 
       const systemPrompt = `You are CallGuard AI, an elite adaptive cybersecurity call-screening assistant deployed on personal phones.
 Your core mission:
@@ -744,7 +810,9 @@ Analyze this caller's response and return your structured assessment.`;
         req.body?.userMessage || "",
         req.body?.currentRiskScore || 5,
         req.body?.history?.length || 0,
-        req.body?.language === "hi" ? "hi" : "en"
+        req.body?.language === "hi" ? "hi" : "en",
+        req.body?.expectedCalls || [],
+        req.body?.userVerification || "UNAVAILABLE"
       );
       res.json({
         ...fallback,

@@ -19,6 +19,9 @@ import {
   Radio,
   Languages,
   MessageSquare,
+  Skull,
+  Columns,
+  Activity,
 } from 'lucide-react';
 import {
   RiskAnalysis,
@@ -27,10 +30,24 @@ import {
   ScreeningMode,
   DemoScenario,
   LanguageOption,
+  ExpectedCall,
+  UserVerificationResponse,
+  RiskTimelinePoint,
+  CallViewTab,
 } from '../types';
+import { CallerView } from './call-views/CallerView';
+import { UserContextView } from './call-views/UserContextView';
+import { UserShieldView } from './call-views/UserShieldView';
+import { ScammerConsoleView } from './call-views/ScammerConsoleView';
 import { speechService } from '../services/speech';
 import { gnaniService } from '../services/gnaniService';
 import { playAnswerBeep, playSecurityAlert, playConnectTone, playHangupTone } from '../services/soundEffects';
+import { getExpectedCalls, matchExpectedCall } from '../services/expectedCalls';
+import { UserVerificationModal } from './UserVerificationModal';
+import { CallConnectionTransition } from './CallConnectionTransition';
+import { LiveRiskAlertBanner } from './LiveRiskAlertBanner';
+import { DynamicRiskTimeline } from './DynamicRiskTimeline';
+import { CallSummaryModal } from './CallSummaryModal';
 
 interface CallScreenProps {
   mode: ScreeningMode;
@@ -38,12 +55,22 @@ interface CallScreenProps {
   callerName: string;
   callerNumber: string;
   activeScenario?: DemoScenario | null;
-  onCallEnded: (action: 'BLOCKED' | 'CONNECTED' | 'DISMISSED', analysis: RiskAnalysis | null) => void;
+  onCallEnded: (
+    action: 'BLOCKED' | 'CONNECTED' | 'DISMISSED',
+    analysis: RiskAnalysis | null,
+    metadata?: {
+      matchedExpectedCall?: ExpectedCall | null;
+      userVerification?: UserVerificationResponse;
+      riskTimeline?: RiskTimelinePoint[];
+      peakRiskScore?: number;
+    }
+  ) => void;
   onRiskUpdate: (analysis: RiskAnalysis) => void;
   currentAnalysis: RiskAnalysis | null;
   onRestart?: () => void;
   onSwitchMode?: (newMode: ScreeningMode) => void;
   onLanguageChange?: (newLang: LanguageOption) => void;
+  onGoToDashboard?: () => void;
 }
 
 interface QuickCue {
@@ -158,6 +185,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({
   onRestart,
   onSwitchMode,
   onLanguageChange,
+  onGoToDashboard,
 }) => {
   const [callDuration, setCallDuration] = useState(0);
   const [voiceState, setVoiceState] = useState<VoiceState>('speaking');
@@ -174,6 +202,44 @@ export const CallScreen: React.FC<CallScreenProps> = ({
   const [activeLang, setActiveLang] = useState<LanguageOption>(language);
   const [gnaniConfigured, setGnaniConfigured] = useState<boolean>(false);
 
+  // Context match & User verification states
+  const [matchedCall, setMatchedCall] = useState<ExpectedCall | null>(null);
+  const [userVerification, setUserVerification] = useState<UserVerificationResponse | undefined>(undefined);
+  const [showVerificationModal, setShowVerificationModal] = useState(false);
+  const matchedCallRef = useRef<ExpectedCall | null>(null);
+  const userVerificationRef = useRef<UserVerificationResponse | undefined>(undefined);
+  const verificationPromptedRef = useRef(false);
+
+  // Call stage transition: Screening -> Ready to Connect -> Connected with Live Shield
+  const [callStage, setCallStage] = useState<'SCREENING' | 'READY_TO_CONNECT' | 'CONNECTED_MONITORING' | 'ENDED'>('SCREENING');
+  const callStageRef = useRef<'SCREENING' | 'READY_TO_CONNECT' | 'CONNECTED_MONITORING' | 'ENDED'>('SCREENING');
+  callStageRef.current = callStage;
+
+  // Dynamic risk trajectory points (Feature 7)
+  const [riskTimeline, setRiskTimeline] = useState<RiskTimelinePoint[]>([
+    {
+      turn: 0,
+      score: 5,
+      level: 'LOW',
+      reason: 'CallGuard screening assistant initialized',
+      triggerEvent: 'Assistant Greeting',
+    },
+  ]);
+
+  // Live Threat Alert Banner (Feature 6)
+  const [liveThreatAlert, setLiveThreatAlert] = useState<{
+    score: number;
+    threatType: string;
+    threatDetails?: string;
+  } | null>(null);
+
+  // Call Summary Modal (Feature 8)
+  const [showSummaryModal, setShowSummaryModal] = useState(false);
+  const [summaryData, setSummaryData] = useState<{
+    action: 'BLOCKED' | 'CONNECTED' | 'DISMISSED';
+    analysis: RiskAnalysis | null;
+  } | null>(null);
+
   // Check Gnani AI credentials status
   useEffect(() => {
     gnaniService.getStatus().then((st) => {
@@ -187,6 +253,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({
   const [simTurnIndex, setSimTurnIndex] = useState(0);
   const [simIsPaused, setSimIsPaused] = useState(false);
   const [simIsAdvancing, setSimIsAdvancing] = useState(false);
+  const [activeViewTab, setActiveViewTab] = useState<CallViewTab>('caller');
 
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const isListeningRef = useRef(false);
@@ -335,6 +402,32 @@ export const CallScreen: React.FC<CallScreenProps> = ({
       setActiveSpeaker('none');
       updateVoiceState('analyzing');
 
+      // Feature 1: Context Matching check
+      const expectedList = getExpectedCalls();
+      const matchResult = matchExpectedCall(callerUtterance, callerName, expectedList);
+      const matched = matchResult.matched ? matchResult.expectedCall : undefined;
+      if (matched && !matchedCallRef.current) {
+        matchedCallRef.current = matched;
+        setMatchedCall(matched);
+      }
+
+      // Feature 2: Trigger User Verification popup on caller claim
+      const lower = callerUtterance.toLowerCase();
+      if (
+        !verificationPromptedRef.current &&
+        (matched ||
+          lower.includes('bank') ||
+          lower.includes('card') ||
+          lower.includes('credit') ||
+          lower.includes('punjab') ||
+          lower.includes('amazon') ||
+          lower.includes('courier') ||
+          lower.includes('interview'))
+      ) {
+        verificationPromptedRef.current = true;
+        setShowVerificationModal(true);
+      }
+
       const callerTurn: ConversationTurn = {
         id: `caller-${Date.now()}`,
         sender: 'caller',
@@ -356,6 +449,8 @@ export const CallScreen: React.FC<CallScreenProps> = ({
             userMessage: callerUtterance.trim(),
             currentRiskScore: currentRiskScoreRef.current,
             language: activeLang,
+            expectedCalls: expectedList,
+            userVerification: userVerificationRef.current,
           }),
         });
 
@@ -366,6 +461,23 @@ export const CallScreen: React.FC<CallScreenProps> = ({
         const analysis: RiskAnalysis = await response.json();
         currentRiskScoreRef.current = analysis.riskScore;
         onRiskUpdate(analysis);
+
+        // Feature 7: Add to dynamic risk timeline
+        const callerTurnsCount = updatedHistory.filter((m) => m.sender === 'caller').length;
+        const timelinePoint: RiskTimelinePoint = {
+          turn: callerTurnsCount,
+          score: analysis.riskScore,
+          level: analysis.riskLevel,
+          reason: analysis.explanation,
+          triggerEvent:
+            analysis.signals?.[0] ||
+            (analysis.riskScore >= 71
+              ? 'Security Threat Alert'
+              : analysis.riskScore <= 30
+              ? 'Low-risk Signal'
+              : 'Screening Evaluation'),
+        };
+        setRiskTimeline((prev) => [...prev, timelinePoint]);
 
         // Stamp caller turn with resulting risk score and signals
         setMessages((prev) =>
@@ -380,18 +492,28 @@ export const CallScreen: React.FC<CallScreenProps> = ({
           )
         );
 
-        // Sound cues based on risk
+        // Feature 6: Live Threat Alert Banner on high risk escalation
         if (analysis.riskScore >= 71) {
           playSecurityAlert();
+          setLiveThreatAlert({
+            score: analysis.riskScore,
+            threatType: analysis.signals?.[0] || 'Credential / OTP Theft Alert',
+            threatDetails: analysis.explanation,
+          });
         } else if (analysis.recommendedAction === 'CONNECT') {
           playConnectTone();
         }
 
+        // Feature 4: Transition to Ready to Connect if AI recommends CONNECT during screening
+        if (analysis.recommendedAction === 'CONNECT' && callStageRef.current === 'SCREENING') {
+          setCallStage('READY_TO_CONNECT');
+        }
+
         // Add AI response turn
         const aiResponseText =
-          (activeLang === 'hi' && analysis.responseTextHindi)
+          activeLang === 'hi' && analysis.responseTextHindi
             ? analysis.responseTextHindi
-            : (analysis.responseText || analysis.nextQuestion);
+            : analysis.responseText || analysis.nextQuestion;
 
         const aiTurn: ConversationTurn = {
           id: `ai-${Date.now()}`,
@@ -413,9 +535,15 @@ export const CallScreen: React.FC<CallScreenProps> = ({
             setTimeout(() => {
               if (analysis.recommendedAction === 'BLOCK') {
                 playHangupTone();
-                onCallEnded('BLOCKED', analysis);
+                setSummaryData({ action: 'BLOCKED', analysis });
+                setShowSummaryModal(true);
               } else if (analysis.recommendedAction === 'CONNECT') {
-                onCallEnded('CONNECTED', analysis);
+                if (callStageRef.current === 'SCREENING') {
+                  setCallStage('READY_TO_CONNECT');
+                } else {
+                  setSummaryData({ action: 'CONNECTED', analysis });
+                  setShowSummaryModal(true);
+                }
               }
             }, 1500);
             return;
@@ -449,6 +577,26 @@ export const CallScreen: React.FC<CallScreenProps> = ({
       }
     },
     [callerName, callerNumber, isMuted, mode, autoListen, activeLang, onRiskUpdate, onCallEnded, updateVoiceState, startListeningMode]
+  );
+
+  // Whisper instruction from protected user to CallGuard AI
+  const handleWhisperInstruction = useCallback(
+    async (instruction: string) => {
+      if (!instruction.trim()) return;
+      const whisperTurn: ConversationTurn = {
+        id: `user-whisper-${Date.now()}`,
+        sender: 'ai',
+        text: isHindi
+          ? `🛡️ [उपयोगकर्ता का निर्देश]: "${instruction}"`
+          : `🛡️ [User Secret Whisper]: "${instruction}"`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      };
+      setMessages((prev) => [...prev, whisperTurn]);
+
+      const whisperPrompt = `The protected user whispered an instruction: "${instruction}". As CallGuard AI, deliver a professional, firm counter-statement or inquiry to the caller now without stating that the user whispered.`;
+      await processCallerSpeech(whisperPrompt);
+    },
+    [isHindi, processCallerSpeech]
   );
 
   // Request/Retry microphone permission
@@ -538,12 +686,12 @@ export const CallScreen: React.FC<CallScreenProps> = ({
   }, []);
 
   // Determine active simulated turns (Hindi or English)
-  const getSimulatedTurns = useCallback(() => {
+  const getSimulatedTurns = useCallback((): string[] => {
     if (!activeScenario) return [];
     if (isHindi && activeScenario.simulatedTurnsHindi && activeScenario.simulatedTurnsHindi.length > 0) {
       return activeScenario.simulatedTurnsHindi;
     }
-    return activeScenario.simulatedTurns;
+    return activeScenario.simulatedTurns || [];
   }, [activeScenario, isHindi]);
 
   // SIMULATION MODE: Fully audible progressive turn execution
@@ -556,6 +704,30 @@ export const CallScreen: React.FC<CallScreenProps> = ({
       const statement = turns[turnIndex];
       setSimIsAdvancing(true);
 
+      // Feature 1: Context matching check for simulation turn
+      const expectedList = getExpectedCalls();
+      const matchResult = matchExpectedCall(statement, callerName, expectedList);
+      const matched = matchResult.matched ? matchResult.expectedCall : undefined;
+      if (matched && !matchedCallRef.current) {
+        matchedCallRef.current = matched;
+        setMatchedCall(matched);
+      }
+
+      // Feature 2: Trigger User Verification popup on caller claim in simulation
+      const lower = statement.toLowerCase();
+      if (
+        !verificationPromptedRef.current &&
+        (matched ||
+          lower.includes('bank') ||
+          lower.includes('punjab') ||
+          lower.includes('credit') ||
+          lower.includes('card') ||
+          lower.includes('application'))
+      ) {
+        verificationPromptedRef.current = true;
+        setShowVerificationModal(true);
+      }
+
       // Step 1: Add caller turn to transcript
       const callerTurn: ConversationTurn = {
         id: `caller-${Date.now()}-${turnIndex}`,
@@ -564,7 +736,8 @@ export const CallScreen: React.FC<CallScreenProps> = ({
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       };
 
-      setMessages((prev) => [...prev, callerTurn]);
+      const updatedHistory = [...messagesRef.current, callerTurn];
+      setMessages(updatedHistory);
       setActiveSpeaker('caller');
       updateVoiceState('speaking');
 
@@ -574,7 +747,6 @@ export const CallScreen: React.FC<CallScreenProps> = ({
         updateVoiceState('analyzing');
 
         // Step 3: Analyze statement through Gemini risk engine (/api/screen)
-        const updatedHistory = [...messagesRef.current, callerTurn];
         try {
           const response = await fetch('/api/screen', {
             method: 'POST',
@@ -586,6 +758,8 @@ export const CallScreen: React.FC<CallScreenProps> = ({
               userMessage: statement.trim(),
               currentRiskScore: currentRiskScoreRef.current,
               language: activeLang,
+              expectedCalls: expectedList,
+              userVerification: userVerificationRef.current,
             }),
           });
 
@@ -596,6 +770,23 @@ export const CallScreen: React.FC<CallScreenProps> = ({
           const analysis: RiskAnalysis = await response.json();
           currentRiskScoreRef.current = analysis.riskScore;
           onRiskUpdate(analysis);
+
+          // Feature 7: Add point to dynamic risk timeline
+          const callerTurnsCount = updatedHistory.filter((m) => m.sender === 'caller').length;
+          const timelinePoint: RiskTimelinePoint = {
+            turn: callerTurnsCount,
+            score: analysis.riskScore,
+            level: analysis.riskLevel,
+            reason: analysis.explanation,
+            triggerEvent:
+              analysis.signals?.[0] ||
+              (analysis.riskScore >= 71
+                ? 'Critical Threat Escalation'
+                : analysis.riskScore <= 30
+                ? 'Context Match Low-Risk'
+                : 'Routine Dialogue'),
+          };
+          setRiskTimeline((prev) => [...prev, timelinePoint]);
 
           // Update caller message with risk score & detected signals
           setMessages((prev) =>
@@ -610,17 +801,28 @@ export const CallScreen: React.FC<CallScreenProps> = ({
             )
           );
 
+          // Feature 6: Live Threat Alert Banner on high risk escalation
           if (analysis.riskScore >= 71) {
             playSecurityAlert();
+            setLiveThreatAlert({
+              score: analysis.riskScore,
+              threatType: analysis.signals?.[0] || 'Credential / OTP Theft Alert',
+              threatDetails: analysis.explanation,
+            });
           } else if (analysis.recommendedAction === 'CONNECT') {
             playConnectTone();
           }
 
+          // Feature 4: Transition to Ready to Connect if AI recommends CONNECT during screening
+          if (analysis.recommendedAction === 'CONNECT' && callStageRef.current === 'SCREENING') {
+            setCallStage('READY_TO_CONNECT');
+          }
+
           // Step 4: Add CallGuard AI response turn
           const aiResponseText =
-            (activeLang === 'hi' && analysis.responseTextHindi)
+            activeLang === 'hi' && analysis.responseTextHindi
               ? analysis.responseTextHindi
-              : (analysis.responseText || analysis.nextQuestion);
+              : analysis.responseText || analysis.nextQuestion;
 
           const aiTurn: ConversationTurn = {
             id: `ai-${Date.now()}-${turnIndex}`,
@@ -645,11 +847,22 @@ export const CallScreen: React.FC<CallScreenProps> = ({
               setTimeout(() => {
                 if (analysis.recommendedAction === 'BLOCK') {
                   playHangupTone();
-                  onCallEnded('BLOCKED', analysis);
+                  setSummaryData({ action: 'BLOCKED', analysis });
+                  setShowSummaryModal(true);
                 } else if (analysis.recommendedAction === 'CONNECT') {
-                  onCallEnded('CONNECTED', analysis);
+                  if (callStageRef.current === 'SCREENING') {
+                    setCallStage('READY_TO_CONNECT');
+                  } else {
+                    setSummaryData({ action: 'CONNECTED', analysis });
+                    setShowSummaryModal(true);
+                  }
                 }
               }, 1500);
+              return;
+            }
+
+            if (analysis.recommendedAction === 'CONNECT' && callStageRef.current === 'SCREENING') {
+              setCallStage('READY_TO_CONNECT');
             }
           };
 
@@ -698,6 +911,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({
   useEffect(() => {
     if (mode !== 'SIMULATION' || !activeScenario) return;
     if (simIsPaused || simIsAdvancing || interactiveModeInSim) return;
+    if (callStage === 'READY_TO_CONNECT') return; // Pause for connection transition
     if (voiceState === 'analyzing' || voiceState === 'speaking') return;
     if (!greetingFinished) return; // Wait for assistant intro to complete
 
@@ -706,7 +920,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({
     // Trigger turn 0 after initial greeting finishes
     if (simTurnIndex === 0) {
       const timer = window.setTimeout(() => {
-        if (!simPausedRef.current && !interactiveModeInSim) {
+        if (!simPausedRef.current && !interactiveModeInSim && callStageRef.current !== 'READY_TO_CONNECT') {
           executeSimulationTurn(0);
         }
       }, 1200);
@@ -714,10 +928,10 @@ export const CallScreen: React.FC<CallScreenProps> = ({
     }
 
     // Auto-advance subsequent turns when AI finishes speaking
-    if (voiceState === 'idle' && !currentAnalysis?.isFinal) {
+    if (voiceState === 'idle' && !currentAnalysis?.isFinal && callStage !== 'READY_TO_CONNECT') {
       if (simTurnIndex < turns.length) {
         const timer = window.setTimeout(() => {
-          if (!simPausedRef.current && !interactiveModeInSim) {
+          if (!simPausedRef.current && !interactiveModeInSim && callStageRef.current !== 'READY_TO_CONNECT') {
             executeSimulationTurn(simTurnIndex);
           }
         }, 1600);
@@ -734,6 +948,7 @@ export const CallScreen: React.FC<CallScreenProps> = ({
     interactiveModeInSim,
     voiceState,
     currentAnalysis,
+    callStage,
     getSimulatedTurns,
     executeSimulationTurn,
   ]);
@@ -787,470 +1002,376 @@ export const CallScreen: React.FC<CallScreenProps> = ({
     );
   };
 
-  const turnsTotal = getSimulatedTurns().length;
+  const turnsTotal = (getSimulatedTurns() || []).length;
 
   return (
     <div className="flex flex-col h-full bg-slate-950 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden">
-      {/* Call Header */}
-      <div className="bg-slate-900/95 border-b border-slate-800 px-4 sm:px-5 py-3.5 flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center gap-3">
-          <div className="relative">
-            <div className="w-10 h-10 rounded-xl bg-indigo-600/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400 font-bold">
-              <Bot className="w-5 h-5" />
-            </div>
-            <span className="absolute -bottom-1 -right-1 flex h-3 w-3">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-            </span>
-          </div>
-
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <h2 className="text-base font-bold text-slate-100">
-                {isHindi && activeScenario?.callerIdentityHindi ? activeScenario.callerIdentityHindi : callerName}
-              </h2>
-              <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300 border border-slate-700 inline-flex items-center gap-1">
-                <span>🇮🇳</span>
-                <span>{callerNumber}</span>
-              </span>
-              <span
-                className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
-                  mode === 'LIVE'
-                    ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
-                    : 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
-                }`}
-              >
-                {mode === 'LIVE' ? 'Live Voice' : 'Simulation'}
-              </span>
-
-              {/* Interactive Language Selector directly in CallScreen */}
-              <div className="flex items-center bg-slate-950 border border-slate-800 rounded-lg p-0.5 text-[11px]">
-                <button
-                  type="button"
-                  onClick={() => handleToggleLanguage('en')}
-                  className={`px-2 py-0.5 rounded font-semibold transition-all ${
-                    activeLang === 'en'
-                      ? 'bg-indigo-600 text-white shadow'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="Switch to English screening"
-                >
-                  EN
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleToggleLanguage('hi')}
-                  className={`px-2 py-0.5 rounded font-semibold transition-all ${
-                    activeLang === 'hi'
-                      ? 'bg-amber-600 text-white shadow'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="Switch to Hindi / Hinglish screening"
-                >
-                  हिंदी
-                </button>
-              </div>
-
-              {/* Gnani Voice indicator when Hindi is active */}
-              {isHindi && (
-                <span
-                  className={`px-2 py-0.5 rounded text-[10px] font-semibold border inline-flex items-center gap-1.5 ${
-                    gnaniConfigured
-                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                      : 'bg-amber-500/10 text-amber-300 border-amber-500/30'
-                  }`}
-                  title={
-                    gnaniConfigured
-                      ? 'Gnani AI Voice Active (Prisma STT + Timbre TTS)'
-                      : 'Using Browser Speech Synthesis (Add GNANI_API_KEY for native Gnani AI voice processing)'
-                  }
-                >
-                  <span className={`w-1.5 h-1.5 rounded-full ${gnaniConfigured ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-                  <span>{gnaniConfigured ? 'Gnani.ai Voice' : 'Hindi (Native)'}</span>
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-2 mt-0.5 text-xs text-slate-400">
-              <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
-                <Shield className="w-3 h-3" /> {isHindi ? 'सुरक्षा सक्रिय' : 'Shield Active'}
-              </span>
-              <span>•</span>
-              <span className="font-mono text-slate-300">{formatTime(callDuration)}</span>
-              {mode === 'SIMULATION' && activeScenario && (
-                <>
-                  <span>•</span>
-                  <span className="text-slate-300 truncate max-w-[220px]">
-                    {isHindi && activeScenario.titleHindi ? activeScenario.titleHindi : activeScenario.title}
-                  </span>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* State Badge & Audio Controls */}
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* Replay Greeting button */}
+      {/* Master View Navigation Tab Bar: Caller View vs User Context View vs Split View */}
+      <div className="bg-slate-900/95 border-b border-slate-800 px-3 sm:px-4 py-2.5 flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs shadow-inner">
+          {/* Caller View Tab */}
           <button
-            onClick={replayGreeting}
-            title={isHindi ? 'असिस्टेंट का परिचय दोबारा सुनें' : 'Replay Assistant Greeting'}
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-slate-100 border border-slate-700 text-xs font-medium flex items-center gap-1.5 transition-colors"
+            type="button"
+            id="tab-caller-view"
+            onClick={() => setActiveViewTab('caller')}
+            className={`flex items-center gap-2 px-3 sm:px-4 py-1.5 rounded-lg font-bold transition-all ${
+              activeViewTab === 'caller'
+                ? 'bg-cyan-600 text-white shadow-md shadow-cyan-600/30'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
           >
-            <RotateCcw className="w-3.5 h-3.5 text-indigo-400" />
-            <span>{isHindi ? 'दोबारा सुनें' : 'Replay Intro'}</span>
+            <Bot className="w-3.5 h-3.5 text-cyan-200" />
+            <span>{isHindi ? 'कॉलर दृश्य (Caller View)' : 'Caller View'}</span>
+            <span className="hidden sm:inline-flex px-1.5 py-0.5 rounded text-[10px] font-normal bg-cyan-950/80 text-cyan-200 border border-cyan-500/30">
+              {isHindi ? 'वार्तालाप व AI' : 'Transcript & AI'}
+            </span>
           </button>
 
-          {/* Stop / Interrupt button when speaking */}
-          {voiceState === 'speaking' && (
-            <button
-              onClick={interruptSpeech}
-              title={isHindi ? 'बोलना रोकें' : 'Interrupt Speech'}
-              className="px-2.5 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-semibold flex items-center gap-1 transition-colors"
-            >
-              <VolumeX className="w-3.5 h-3.5" />
-              <span>{isHindi ? 'रोकें' : 'Skip Audio'}</span>
-            </button>
-          )}
-
+          {/* User Context View Tab */}
           <button
-            onClick={() => {
+            type="button"
+            id="tab-user-context-view"
+            onClick={() => setActiveViewTab('user_context')}
+            className={`flex items-center gap-2 px-3 sm:px-4 py-1.5 rounded-lg font-bold transition-all ${
+              activeViewTab === 'user_context'
+                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Shield className="w-3.5 h-3.5 text-emerald-200" />
+            <span>{isHindi ? 'उपयोगकर्ता संदर्भ (User Context View)' : 'User Context View'}</span>
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-slate-900/80 text-emerald-300 border border-emerald-500/30">
+              {currentRiskScoreRef.current}/100
+            </span>
+            <span className="hidden md:inline-flex px-1.5 py-0.5 rounded text-[10px] font-normal bg-emerald-950/80 text-emerald-200 border border-emerald-500/30">
+              {isHindi ? 'जोखिम व सत्यापन' : 'Timeline & Verification'}
+            </span>
+          </button>
+
+          {/* Split View Tab */}
+          <button
+            type="button"
+            id="tab-split-view"
+            onClick={() => setActiveViewTab('split')}
+            className={`hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold transition-all ${
+              activeViewTab === 'split'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Columns className="w-3.5 h-3.5 text-indigo-300" />
+            <span>{isHindi ? 'विभाजित दृश्य (Split)' : 'Split View'}</span>
+          </button>
+        </div>
+
+        {/* Global Controls: Language Switcher, Caller ID summary */}
+        <div className="flex items-center gap-2">
+          {/* Interactive Language Selector */}
+          <div className="flex items-center bg-slate-950 border border-slate-800 rounded-lg p-0.5 text-[11px]">
+            <button
+              type="button"
+              onClick={() => handleToggleLanguage('en')}
+              className={`px-2 py-0.5 rounded font-semibold transition-all ${
+                activeLang === 'en'
+                  ? 'bg-indigo-600 text-white shadow'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Switch to English screening"
+            >
+              EN
+            </button>
+            <button
+              type="button"
+              onClick={() => handleToggleLanguage('hi')}
+              className={`px-2 py-0.5 rounded font-semibold transition-all ${
+                activeLang === 'hi'
+                  ? 'bg-amber-600 text-white shadow'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Switch to Hindi / Hinglish screening"
+            >
+              हिंदी
+            </button>
+          </div>
+
+          <span className="hidden sm:inline-flex px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-slate-800 text-slate-300 border border-slate-700">
+            {mode === 'LIVE' ? 'Live Voice' : 'Simulation'}
+          </span>
+        </div>
+      </div>
+
+      {/* Main Tabbed Views Area */}
+      <div className="flex-1 overflow-hidden p-2 sm:p-3">
+        {activeViewTab === 'caller' && (
+          <CallerView
+            messages={messages}
+            voiceState={voiceState}
+            activeSpeaker={activeSpeaker}
+            isTranscribing={voiceState === 'listening' && !!interimTranscript}
+            liveTranscription={interimTranscript}
+            isAnalyzing={voiceState === 'analyzing'}
+            callDuration={callDuration}
+            isMuted={isMuted}
+            onToggleMute={() => {
               if (!isMuted) speechService.stopSpeaking();
               setIsMuted(!isMuted);
             }}
-            title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
-            className={`p-2 rounded-lg border transition-colors ${
-              isMuted
-                ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
-                : 'bg-slate-800 text-slate-400 hover:text-slate-200 border-slate-700'
-            }`}
-          >
-            {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-          </button>
-
-          {/* Dynamic Speaker Indicator */}
-          {voiceState === 'speaking' && activeSpeaker === 'caller' && (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-purple-500/20 border border-purple-500/40 text-purple-300 text-xs font-semibold animate-pulse">
-              <Volume2 className="w-4 h-4 text-purple-400" />
-              <span>{isHindi ? 'कॉलर बोल रहा है...' : 'Caller Speaking...'}</span>
-            </div>
-          )}
-
-          {voiceState === 'speaking' && activeSpeaker === 'ai' && (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-semibold animate-pulse">
-              <Volume2 className="w-4 h-4 text-emerald-400" />
-              <span>{isHindi ? 'कॉल-गार्ड बोल रहा है...' : 'CallGuard Speaking...'}</span>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Transcript Area */}
-      <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4 font-sans text-sm">
-        {messages.map((turn) => {
-          const isAI = turn.sender === 'ai';
-          return (
-            <div
-              key={turn.id}
-              className={`flex gap-3 max-w-[88%] ${isAI ? 'mr-auto' : 'ml-auto flex-row-reverse'}`}
-            >
-              {/* Avatar Icon */}
-              <div
-                className={`w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0 text-xs font-bold ${
-                  isAI
-                    ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-300'
-                    : 'bg-purple-600/30 border border-purple-500/50 text-purple-300'
-                }`}
-              >
-                {isAI ? <Bot className="w-4 h-4" /> : <User className="w-4 h-4" />}
-              </div>
-
-              {/* Message Bubble */}
-              <div
-                className={`rounded-2xl px-4 py-3 shadow-md ${
-                  isAI
-                    ? 'bg-slate-900 border border-slate-800 text-slate-100 rounded-tl-sm'
-                    : 'bg-gradient-to-br from-indigo-700 to-indigo-900 text-white rounded-tr-sm border border-indigo-500/30'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-3 mb-1 text-[11px] opacity-75">
-                  <span className="font-semibold">
-                    {isAI
-                      ? isHindi
-                        ? 'कॉल-गार्ड AI असिस्टेंट'
-                        : 'CallGuard AI'
-                      : isHindi && activeScenario?.callerIdentityHindi
-                      ? activeScenario.callerIdentityHindi
-                      : callerName}
-                  </span>
-                  <span className="font-mono">{turn.timestamp}</span>
-                </div>
-
-                <p className="leading-relaxed whitespace-pre-wrap font-medium">{turn.text}</p>
-
-                {/* Badges / Signals if present on this turn */}
-                {turn.detectedSignals && turn.detectedSignals.length > 0 && (
-                  <div className="mt-2.5 pt-2 border-t border-slate-700/50 flex flex-wrap gap-1.5">
-                    {turn.detectedSignals.map((signal, idx) => (
-                      <span
-                        key={idx}
-                        className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-rose-500/20 text-rose-300 border border-rose-500/30"
-                      >
-                        ⚠️ {signal}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
-
-        {/* Live speech transcription bubble */}
-        {voiceState === 'listening' && interimTranscript && (
-          <div className="flex gap-3 max-w-[85%] ml-auto flex-row-reverse animate-pulse">
-            <div className="w-8 h-8 rounded-xl bg-cyan-600/30 border border-cyan-500/50 text-cyan-300 flex items-center justify-center flex-shrink-0">
-              <Mic className="w-4 h-4 text-cyan-400" />
-            </div>
-            <div className="rounded-2xl px-4 py-3 bg-cyan-950/40 border border-cyan-500/40 text-cyan-200">
-              <span className="text-[11px] text-cyan-400 font-semibold block mb-1">
-                {isHindi ? 'लाइव आवाज सुनी जा रही है...' : 'Transcribing Live Speech...'}
-              </span>
-              <p className="text-sm italic">{interimTranscript}</p>
-            </div>
-          </div>
+            language={activeLang}
+            onToggleLanguage={handleToggleLanguage}
+            callerName={callerName}
+            callerNumber={callerNumber}
+            activeScenario={activeScenario}
+            mode={mode}
+            onSpeakAsCaller={(text?: string) => {
+              if (text) {
+                if (voiceState === 'speaking') interruptSpeech();
+                processCallerSpeech(text);
+              } else {
+                if (voiceState === 'speaking') interruptSpeech();
+                if (voiceState === 'listening') stopListeningMode();
+                else startListeningMode(true);
+              }
+            }}
+            isListening={voiceState === 'listening'}
+            manualInput={manualInput}
+            setManualInput={setManualInput}
+            onSubmitManualInput={() => {
+              if (manualInput.trim()) {
+                if (voiceState === 'speaking') interruptSpeech();
+                processCallerSpeech(manualInput.trim());
+                setManualInput('');
+              }
+            }}
+            onInterruptAudio={interruptSpeech}
+            onReplayGreeting={replayGreeting}
+            isPaused={simIsPaused}
+            onTogglePause={() => setSimIsPaused(!simIsPaused)}
+            onNextTurn={() => {
+              if (voiceState === 'speaking') interruptSpeech();
+              executeSimulationTurn(simTurnIndex);
+            }}
+            onRestartSimulation={handleRestart}
+            simTurnIndex={simTurnIndex}
+            totalSimTurns={turnsTotal}
+            currentAnalysis={currentAnalysis}
+            currentRiskScore={currentRiskScoreRef.current}
+            onEndCall={(action) => {
+              playHangupTone();
+              setSummaryData({ action, analysis: currentAnalysis });
+              setShowSummaryModal(true);
+            }}
+          />
         )}
 
-        {/* Analyzing Spinner */}
-        {voiceState === 'analyzing' && (
-          <div className="flex gap-3 max-w-[85%] mr-auto items-center text-indigo-400 text-xs py-2">
-            <Sparkles className="w-4 h-4 animate-spin text-indigo-400" />
-            <span>
-              {isHindi
-                ? 'कॉल-गार्ड AI कॉलर के उद्देश्य और संभावित फ्रॉड का विश्लेषण कर रहा है...'
-                : 'CallGuard AI is evaluating intent, missing info, and threat signals...'}
-            </span>
-          </div>
+        {activeViewTab === 'user_context' && (
+          <UserContextView
+            currentAnalysis={currentAnalysis}
+            riskTimeline={riskTimeline}
+            currentRiskScore={currentRiskScoreRef.current}
+            callerName={callerName}
+            callerNumber={callerNumber}
+            language={activeLang}
+            matchedExpectedCall={matchedCall}
+            userVerification={userVerificationRef.current}
+            onUserVerificationChange={(res) => {
+              setUserVerification(res);
+              userVerificationRef.current = res;
+              if (res === 'UNEXPECTED') {
+                currentRiskScoreRef.current = Math.min(100, currentRiskScoreRef.current + 25);
+              }
+            }}
+            onSendWhisper={handleWhisperInstruction}
+            onJoinCall={() => {
+              setCallStage('CONNECTED_MONITORING');
+              playConnectTone();
+              if (mode === 'SIMULATION') {
+                setTimeout(() => {
+                  const turns = getSimulatedTurns();
+                  if (simTurnIndex < turns.length) {
+                    executeSimulationTurn(simTurnIndex);
+                  }
+                }, 800);
+              }
+            }}
+            onDeclineCall={() => {
+              playHangupTone();
+              setSummaryData({ action: 'DISMISSED', analysis: currentAnalysis });
+              setShowSummaryModal(true);
+            }}
+            onBlockAndReport={() => {
+              playHangupTone();
+              setSummaryData({ action: 'BLOCKED', analysis: currentAnalysis });
+              setShowSummaryModal(true);
+            }}
+            callStage={callStage}
+            liveThreatAlert={liveThreatAlert}
+          />
         )}
 
-        <div ref={transcriptEndRef} />
-      </div>
-
-      {/* Error Message Toast */}
-      {errorMessage && (
-        <div className="mx-4 mb-2 p-2.5 rounded-xl bg-rose-950/80 border border-rose-500/40 text-rose-300 text-xs flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-rose-400 flex-shrink-0" />
-            <span>{errorMessage}</span>
-          </div>
-          <button
-            onClick={() => setErrorMessage(null)}
-            className="text-rose-400 hover:text-rose-200 px-2 font-bold"
-          >
-            ✕
-          </button>
-        </div>
-      )}
-
-      {/* Bottom Controls & Interaction Bar */}
-      <div className="bg-slate-900 border-t border-slate-800 p-4 flex flex-col gap-3">
-        {/* Simulation Mode Toggle Pill: Auto-Play vs Interactive Takeover */}
-        {mode === 'SIMULATION' && (
-          <div className="flex items-center justify-between gap-2 pb-1 border-b border-slate-800/80 flex-wrap">
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-slate-400 font-semibold flex items-center gap-1">
-                <Radio className="w-3.5 h-3.5 text-purple-400" />
-                {isHindi ? 'सिमुलेशन नियंत्रण:' : 'Simulation Controls:'}
-              </span>
-              <button
-                type="button"
-                onClick={() => setInteractiveModeInSim(!interactiveModeInSim)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all ${
-                  interactiveModeInSim
-                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                    : 'bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-700'
-                }`}
-                title={isHindi ? 'खुद कॉलर बनकर हिंदी में बात या टाइप करें' : 'Interact as the caller yourself'}
-              >
-                <MessageSquare className="w-3.5 h-3.5" />
-                <span>
-                  {interactiveModeInSim
-                    ? isHindi
-                      ? 'इंटरैक्टिव मोड सक्रिय (आप बोल/टाइप रहे हैं)'
-                      : 'Interactive Mode Active (You Speak/Type)'
-                    : isHindi
-                    ? 'खुद कॉलर बनकर बात करें'
-                    : 'Speak/Type as Caller'}
-                </span>
-              </button>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setSimIsPaused(!simIsPaused)}
-                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold flex items-center gap-1"
-              >
-                {simIsPaused ? <Play className="w-3 h-3 text-emerald-400" /> : <Pause className="w-3 h-3 text-amber-400" />}
-                <span>{simIsPaused ? (isHindi ? 'जारी रखें' : 'Resume') : (isHindi ? 'रोकें' : 'Pause')}</span>
-              </button>
-
-              <button
-                onClick={() => {
+        {activeViewTab === 'split' && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 h-full overflow-y-auto">
+            {/* Left: Caller View (Transcript & AI Interaction) */}
+            <div className="h-full min-h-[500px]">
+              <CallerView
+                messages={messages}
+                voiceState={voiceState}
+                activeSpeaker={activeSpeaker}
+                isTranscribing={voiceState === 'listening' && !!interimTranscript}
+                liveTranscription={interimTranscript}
+                isAnalyzing={voiceState === 'analyzing'}
+                callDuration={callDuration}
+                isMuted={isMuted}
+                onToggleMute={() => {
+                  if (!isMuted) speechService.stopSpeaking();
+                  setIsMuted(!isMuted);
+                }}
+                language={activeLang}
+                onToggleLanguage={handleToggleLanguage}
+                callerName={callerName}
+                callerNumber={callerNumber}
+                activeScenario={activeScenario}
+                mode={mode}
+                onSpeakAsCaller={(text?: string) => {
+                  if (text) {
+                    if (voiceState === 'speaking') interruptSpeech();
+                    processCallerSpeech(text);
+                  } else {
+                    if (voiceState === 'speaking') interruptSpeech();
+                    if (voiceState === 'listening') stopListeningMode();
+                    else startListeningMode(true);
+                  }
+                }}
+                isListening={voiceState === 'listening'}
+                manualInput={manualInput}
+                setManualInput={setManualInput}
+                onSubmitManualInput={() => {
+                  if (manualInput.trim()) {
+                    if (voiceState === 'speaking') interruptSpeech();
+                    processCallerSpeech(manualInput.trim());
+                    setManualInput('');
+                  }
+                }}
+                onInterruptAudio={interruptSpeech}
+                onReplayGreeting={replayGreeting}
+                isPaused={simIsPaused}
+                onTogglePause={() => setSimIsPaused(!simIsPaused)}
+                onNextTurn={() => {
                   if (voiceState === 'speaking') interruptSpeech();
                   executeSimulationTurn(simTurnIndex);
                 }}
-                disabled={simIsAdvancing || voiceState === 'analyzing' || simTurnIndex >= turnsTotal}
-                className="px-3 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold flex items-center gap-1 disabled:opacity-40"
-              >
-                <SkipForward className="w-3 h-3" />
-                <span>{isHindi ? `अगला टर्न (${simTurnIndex + 1}/${turnsTotal})` : `Next (${simTurnIndex + 1}/${turnsTotal})`}</span>
-              </button>
+                onRestartSimulation={handleRestart}
+                simTurnIndex={simTurnIndex}
+                totalSimTurns={turnsTotal}
+                currentAnalysis={currentAnalysis}
+                currentRiskScore={currentRiskScoreRef.current}
+                onEndCall={(action) => {
+                  playHangupTone();
+                  setSummaryData({ action, analysis: currentAnalysis });
+                  setShowSummaryModal(true);
+                }}
+              />
+            </div>
 
-              <button
-                onClick={handleRestart}
-                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs"
-                title={isHindi ? 'शुरू से रीस्टार्ट करें' : 'Restart Call'}
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-              </button>
+            {/* Right: User Context View (Risk Timeline & Verification) */}
+            <div className="h-full min-h-[500px]">
+              <UserContextView
+                currentAnalysis={currentAnalysis}
+                riskTimeline={riskTimeline}
+                currentRiskScore={currentRiskScoreRef.current}
+                callerName={callerName}
+                callerNumber={callerNumber}
+                language={activeLang}
+                matchedExpectedCall={matchedCall}
+                userVerification={userVerificationRef.current}
+                onUserVerificationChange={(res) => {
+                  setUserVerification(res);
+                  userVerificationRef.current = res;
+                  if (res === 'UNEXPECTED') {
+                    currentRiskScoreRef.current = Math.min(100, currentRiskScoreRef.current + 25);
+                  }
+                }}
+                onSendWhisper={handleWhisperInstruction}
+                onJoinCall={() => {
+                  setCallStage('CONNECTED_MONITORING');
+                  playConnectTone();
+                  if (mode === 'SIMULATION') {
+                    setTimeout(() => {
+                      const turns = getSimulatedTurns();
+                      if (simTurnIndex < turns.length) {
+                        executeSimulationTurn(simTurnIndex);
+                      }
+                    }, 800);
+                  }
+                }}
+                onDeclineCall={() => {
+                  playHangupTone();
+                  setSummaryData({ action: 'DISMISSED', analysis: currentAnalysis });
+                  setShowSummaryModal(true);
+                }}
+                onBlockAndReport={() => {
+                  playHangupTone();
+                  setSummaryData({ action: 'BLOCKED', analysis: currentAnalysis });
+                  setShowSummaryModal(true);
+                }}
+                callStage={callStage}
+                liveThreatAlert={liveThreatAlert}
+              />
             </div>
           </div>
         )}
-
-        {/* Quick Interactive Cues (Enabled in both Live & Simulation modes) */}
-        <div className="flex items-center gap-2 overflow-x-auto text-xs pb-1 scrollbar-thin">
-          <span className="text-slate-400 font-medium whitespace-nowrap flex items-center gap-1">
-            <Play className="w-3 h-3 text-indigo-400" /> {isHindi ? 'त्वरित कॉलर कथन:' : 'Quick caller replies:'}
-          </span>
-
-          {INTERACTIVE_CUES.map((cue) => {
-            const isDanger = cue.riskType === 'danger';
-            const isMedium = cue.riskType === 'medium';
-            const label = isHindi ? cue.labelHi : cue.label;
-            const text = isHindi ? cue.textHi : cue.textEn;
-
-            let badgeClass = 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700';
-            if (isDanger) {
-              badgeClass = 'bg-rose-950/50 hover:bg-rose-900/50 text-rose-300 border-rose-500/30';
-            } else if (isMedium) {
-              badgeClass = 'bg-amber-950/40 hover:bg-amber-900/40 text-amber-300 border-amber-500/30';
-            }
-
-            return (
-              <button
-                key={cue.id}
-                onClick={() => {
-                  if (voiceState === 'speaking') interruptSpeech();
-                  processCallerSpeech(text);
-                }}
-                disabled={voiceState === 'analyzing'}
-                className={`px-2.5 py-1 rounded-lg border whitespace-nowrap transition-colors disabled:opacity-50 text-[11px] font-medium ${badgeClass}`}
-                title={text}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Voice Microphone, Termination, and Fallback Buttons */}
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => {
-              if (voiceState === 'listening') {
-                stopListeningMode();
-              } else {
-                if (voiceState === 'speaking') {
-                  interruptSpeech();
-                }
-                startListeningMode(true);
-              }
-            }}
-            disabled={voiceState === 'analyzing'}
-            className={`flex-1 flex items-center justify-center gap-3 py-3 px-4 rounded-xl font-semibold text-sm transition-all shadow-lg ${
-              voiceState === 'listening'
-                ? 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-cyan-500/25 ring-2 ring-cyan-400 animate-pulse'
-                : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/25'
-            } disabled:opacity-50 disabled:cursor-not-allowed`}
-          >
-            {voiceState === 'listening' ? (
-              <>
-                <Mic className="w-5 h-5 animate-bounce text-slate-950" />
-                <span>
-                  {isHindi
-                    ? 'आपकी आवाज़ सुनी जा रही है • बोलने के बाद क्लिक करें'
-                    : 'Listening to you • Click when done'}
-                </span>
-              </>
-            ) : (
-              <>
-                <Mic className="w-5 h-5" />
-                <span>
-                  {isHindi
-                    ? 'माइक्रोफ़ोन से बोलें (हिंदी / Hinglish)'
-                    : 'Speak into Microphone'}
-                </span>
-              </>
-            )}
-          </button>
-
-          <button
-            onClick={() => onCallEnded('BLOCKED', currentAnalysis)}
-            title={isHindi ? 'कॉल ब्लॉक करें' : 'Force Block Caller'}
-            className="p-3 rounded-xl bg-rose-950/70 hover:bg-rose-900/80 text-rose-300 border border-rose-500/40 transition-colors flex items-center justify-center"
-          >
-            <PhoneOff className="w-5 h-5" />
-          </button>
-
-          <button
-            onClick={() => onCallEnded('CONNECTED', currentAnalysis)}
-            title={isHindi ? 'कॉल कनेक्ट करें' : 'Force Connect Line'}
-            className="p-3 rounded-xl bg-emerald-950/70 hover:bg-emerald-900/80 text-emerald-300 border border-emerald-500/40 transition-colors flex items-center justify-center"
-          >
-            <PhoneForwarded className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Text fallback input bar */}
-        <form onSubmit={handleManualSubmit} className="flex items-center gap-2">
-          <input
-            type="text"
-            value={manualInput}
-            onChange={(e) => setManualInput(e.target.value)}
-            placeholder={
-              isHindi
-                ? 'या कॉलर की बात हिंदी या Hinglish में यहाँ लिखें (जैसे: "नमस्ते, मैं बैंक से हूँ")...'
-                : 'Or type what the caller says (in English or Hinglish)...'
-            }
-            disabled={voiceState === 'analyzing'}
-            className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:opacity-50"
-          />
-          <button
-            type="submit"
-            disabled={!manualInput.trim() || voiceState === 'analyzing'}
-            className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 disabled:opacity-40 transition-colors flex items-center justify-center"
-            title={isHindi ? 'संदेश भेजें' : 'Send'}
-          >
-            <Send className="w-4 h-4" />
-          </button>
-        </form>
-
-        {/* Informative Hint when Microphone Permission is Denied or Unavailable */}
-        {micPermissionDenied && (
-          <div className="flex items-center justify-between p-2 rounded-lg bg-amber-950/40 border border-amber-500/30 text-amber-300 text-xs">
-            <span>
-              {isHindi
-                ? 'माइक्रोफ़ोन अनुपलब्ध है। आप ऊपर दिए गए त्वरित बटनों या टेक्स्ट बॉक्स का उपयोग कर सकते हैं।'
-                : 'Microphone unavailable in this environment. Use the quick buttons or type text above.'}
-            </span>
-            <button
-              onClick={handleRetryMicPermission}
-              className="underline font-semibold ml-2 hover:text-white"
-            >
-              {isHindi ? 'पुनः प्रयास करें' : 'Retry Mic'}
-            </button>
-          </div>
-        )}
       </div>
+
+      {/* Feature 2: User Verification Popup */}
+      <UserVerificationModal
+        isOpen={showVerificationModal}
+        callerClaimedOrg={matchedCall?.organization || currentAnalysis?.claimedOrganization || callerName}
+        callerReason={matchedCall?.reason || currentAnalysis?.intent || 'Account / Inquiry Verification'}
+        matchedExpectedCall={matchedCall}
+        onRespond={(res) => {
+          setUserVerification(res);
+          userVerificationRef.current = res;
+          setShowVerificationModal(false);
+          if (res === 'UNEXPECTED') {
+            currentRiskScoreRef.current = Math.min(100, currentRiskScoreRef.current + 25);
+          }
+        }}
+        language={activeLang}
+      />
+
+      {/* Feature 8: Continuous Monitoring & Call Summary Modal */}
+      {showSummaryModal && summaryData && (
+        <CallSummaryModal
+          isOpen={showSummaryModal}
+          action={summaryData.action}
+          callerName={callerName}
+          callerNumber={callerNumber}
+          callDuration={callDuration}
+          finalAnalysis={summaryData.analysis}
+          matchedExpectedCall={matchedCall}
+          userVerification={userVerificationRef.current}
+          riskTimeline={riskTimeline}
+          onClose={() => {
+            setShowSummaryModal(false);
+            onCallEnded(summaryData.action, summaryData.analysis, {
+              matchedExpectedCall: matchedCall,
+              userVerification: userVerificationRef.current,
+              riskTimeline: riskTimeline,
+              peakRiskScore: Math.max(...riskTimeline.map((p) => p.score), summaryData.analysis?.riskScore || 0),
+            });
+          }}
+          onGoToDashboard={() => {
+            setShowSummaryModal(false);
+            onCallEnded(summaryData.action, summaryData.analysis, {
+              matchedExpectedCall: matchedCall,
+              userVerification: userVerificationRef.current,
+              riskTimeline: riskTimeline,
+              peakRiskScore: Math.max(...riskTimeline.map((p) => p.score), summaryData.analysis?.riskScore || 0),
+            });
+            if (onGoToDashboard) onGoToDashboard();
+          }}
+          language={activeLang}
+        />
+      )}
     </div>
   );
 };
