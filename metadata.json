@@ -1,0 +1,10 @@
+{
+  "name": "Remix CallGuard AI",
+  "description": "AI-powered conversational call-screening system that understands why callers are calling, detects fraud signals, and protects users from phone scams.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
