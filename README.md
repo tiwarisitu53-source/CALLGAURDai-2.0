@@ -472,4 +472,3 @@ Our goal is to make phone communication **more context-aware, explainable and co
 ---
 
 ## 🚀 Built for safer conversations. Built for real-world uncertainty.
-
